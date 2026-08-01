@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import asyncio
@@ -20,6 +19,13 @@ from playwright.async_api import (
     TimeoutError as PlaywrightTimeout,
 )
 _OS = platform.system()   # "Windows" | "Darwin" | "Linux"
+
+# If True, browser_control never tries to attach to your real, already-open
+# Chrome profile (which always fails while Chrome is running with tabs open).
+# It goes straight to a separate, dedicated JARVIS profile/window instead —
+# never touches or reuses your personal open tabs.
+_PREFER_DEDICATED_PROFILE = True
+
 
 def _normalize_url(url: str) -> str:
     """
@@ -571,8 +577,6 @@ class _BrowserSession:
             print(f"[Browser] ✅ Safari launched")
             return
 
-        profile = _real_profile_dir(self.browser_name)
-
         kwargs = {
             "headless":    False,
             "slow_mo":     0,
@@ -598,6 +602,19 @@ class _BrowserSession:
             + (f"/{channel}" if channel else "")
             + (f" @ {exe}" if exe else "")
         )
+
+        # Dedicated JARVIS profile — separate window, never touches or reuses
+        # your personal open tabs. Skips the "real profile" attempt entirely
+        # (that attempt always fails while your own browser is already open
+        # with tabs, so trying it first only wastes time).
+        if _PREFER_DEDICATED_PROFILE:
+            jarvis_profile = str(Path.home() / ".jarvis_profiles" / self.browser_name)
+            Path(jarvis_profile).mkdir(parents=True, exist_ok=True)
+            self._context = await engine_obj.launch_persistent_context(jarvis_profile, **kwargs)
+            self._page = await self._adopt_page()
+            print(f"[Browser] ✅ Launched [{label}] — dedicated JARVIS profile "
+                  f"(separate window, your own tabs untouched)")
+            return
 
         try:
             self._context = await engine_obj.launch_persistent_context(profile, **kwargs)
@@ -626,10 +643,22 @@ class _BrowserSession:
 
     async def _get_page(self) -> Page:
         await self._launch()
-        # If somehow page got closed, open a fresh one
+
         if self._page is None or self._page.is_closed():
-            self._page = await self._context.new_page()
-            await asyncio.sleep(0.2)
+            try:
+                self._page = await self._context.new_page()
+                await asyncio.sleep(0.2)
+            except Exception as e:
+                # The context/browser itself died (e.g. the window was closed,
+                # or the profile lock conflicted). Discard the dead session and
+                # relaunch once from scratch, instead of failing forever.
+                print(f"[Browser] Session for '{self.browser_name}' appears dead "
+                      f"({e}) — relaunching a fresh session…")
+                self._context = None
+                self._page = None
+                await self._launch()
+                self._page = await self._context.new_page()
+                await asyncio.sleep(0.2)
         return self._page
 
     async def go_to(self, url: str) -> str:

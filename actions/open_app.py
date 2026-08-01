@@ -13,6 +13,10 @@ _SYSTEM = platform.system()
 
 _APP_ALIASES: dict[str, dict[str, str]] = {
 
+    "block note":         {"Windows": "notepad.exe",             "Darwin": "TextEdit",             "Linux": "gedit"},
+    "blocco note":        {"Windows": "notepad.exe",             "Darwin": "TextEdit",             "Linux": "gedit"},
+    "blocknote":          {"Windows": "notepad.exe",             "Darwin": "TextEdit",             "Linux": "gedit"},
+    "block notes":        {"Windows": "notepad.exe",             "Darwin": "TextEdit",             "Linux": "gedit"},
     "chrome":             {"Windows": "chrome",                  "Darwin": "Google Chrome",        "Linux": "google-chrome"},
     "google chrome":      {"Windows": "chrome",                  "Darwin": "Google Chrome",        "Linux": "google-chrome"},
     "firefox":            {"Windows": "firefox",                 "Darwin": "Firefox",              "Linux": "firefox"},

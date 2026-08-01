@@ -46,9 +46,40 @@ def load_api_keys() -> dict:
 def get_gemini_key() -> str | None:
     return load_api_keys().get("gemini_api_key")
 
+
+def get_llm_provider() -> str | None:
+    """
+    Returns the configured local LLM provider ('ollama', 'openai', etc.),
+    or None if no local provider has been set.
+    """
+    raw = load_api_keys().get("llm_provider", "")
+    raw = raw.strip().lower() if isinstance(raw, str) else ""
+    return raw or None
+
+
+def is_local_configured() -> bool:
+    """True if a local LLM provider (Ollama or an OpenAI-compatible server) is configured."""
+    provider = get_llm_provider()
+    return provider in ("ollama", "openai", "lmstudio", "localai", "jan", "llamacpp")
+
+
 def is_configured() -> bool:
-    key = get_gemini_key()
-    return bool(key and len(key) > 15)
+    """
+    True if the assistant is ready to start:
+      - a valid Gemini key is set, OR
+      - a local LLM provider (Ollama / OpenAI-compatible) is set
+    In both cases, the operating system must also be recorded.
+    """
+    data = load_api_keys()
+
+    os_set = bool(data.get("os_system"))
+    if not os_set:
+        return False
+
+    gemini_key = data.get("gemini_api_key")
+    gemini_ok  = bool(gemini_key and len(gemini_key) > 15)
+
+    return gemini_ok or is_local_configured()
 
 
 def get_assistant_name() -> str:

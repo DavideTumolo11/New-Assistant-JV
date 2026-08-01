@@ -223,6 +223,13 @@ class KokoroTTSEngine:
     the first real speak() call has zero compilation overhead.
     """
 
+    # Silence prepended before the very first audio chunk of an utterance.
+    # Gives the audio device time to open the output stream so the real
+    # speech doesn't lose its first phoneme(s) to device startup latency.
+    # Raised from 120ms to 350ms — 120ms was not enough on this system,
+    # the first word was still getting clipped/delayed.
+    _LEAD_IN_MS = 350
+
     def __init__(self, voice: str = "af_heart", speed: float = 1.0):
         self.voice     = voice
         self.speed     = speed
@@ -307,7 +314,7 @@ class KokoroTTSEngine:
         except Exception as e:
             print(f"[TTS] Kokoro warmup warning: {e}")
 
-    def speak(self, text: str) -> None:
+    def speak(self, text: str, stop_event: "threading.Event | None" = None) -> None:
         with self._lock:
             if self._pipeline is None:
                 self._init()
@@ -324,6 +331,8 @@ class KokoroTTSEngine:
         def _synth():
             try:
                 for _, _, audio in self._pipeline(text, voice=self.voice, speed=self.speed):
+                    if stop_event is not None and stop_event.is_set():
+                        break
                     if audio is not None:
                         arr = _to_numpy(audio)
                         arr = _compress_silence(arr)
@@ -338,10 +347,21 @@ class KokoroTTSEngine:
         synth_thread.start()
 
         # Player runs in this thread so sd.wait() doesn't block the synth thread.
+        first_chunk = True
         while True:
+            if stop_event is not None and stop_event.is_set():
+                sd.stop()
+                break
             arr = audio_q.get()
             if arr is None:
                 break
+            if stop_event is not None and stop_event.is_set():
+                sd.stop()
+                break
+            if first_chunk:
+                lead_in = np.zeros(int(24000 * self._LEAD_IN_MS / 1000), dtype=np.float32)
+                arr = np.concatenate([lead_in, arr])
+                first_chunk = False
             _play_np(arr, 24000)
 
         synth_thread.join()
@@ -387,9 +407,10 @@ class TTSPlayer:
     """
 
     def __init__(self, engine):
-        self._engine  = engine
-        self._playing = False
-        self._lock    = threading.Lock()
+        self._engine     = engine
+        self._playing    = False
+        self._lock       = threading.Lock()
+        self._stop_event = threading.Event()
 
     @property
     def is_playing(self) -> bool:
@@ -402,12 +423,20 @@ class TTSPlayer:
         on_done:  Optional[Callable] = None,
     ) -> None:
         """Synthesise and play text. BLOCKING – call from a dedicated thread."""
+        self._stop_event.clear()
         try:
             with self._lock:
                 self._playing = True
             if on_start:
                 on_start()
-            self._engine.speak(text)
+            try:
+                # Engines that support interruption (Kokoro) accept stop_event.
+                self._engine.speak(text, stop_event=self._stop_event)
+            except TypeError:
+                # Older/simple engines (EdgeTTS, ElevenLabs, Chatterbox) don't
+                # accept stop_event — they still play as a single block, and
+                # sd.stop() below still interrupts them immediately.
+                self._engine.speak(text)
         except Exception as e:
             print(f"[TTS] Error: {e}")
         finally:
@@ -417,6 +446,8 @@ class TTSPlayer:
                 on_done()
 
     def stop(self) -> None:
+        """Stop playback immediately and prevent any further queued chunks from playing."""
+        self._stop_event.set()
         sd.stop()
         with self._lock:
             self._playing = False

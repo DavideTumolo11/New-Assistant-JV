@@ -11,7 +11,12 @@ import numpy as np
 class WhisperSTT:
     """Offline transcription using faster-whisper."""
 
-    def __init__(self, model_name: str = "base", language: str | None = None):
+    def __init__(
+        self,
+        model_name: str = "base",
+        language: str | None = None,
+        initial_prompt: str | None = None,
+    ):
         import os
         from faster_whisper import WhisperModel
         print(f"[STT] Loading Whisper '{model_name}'…")
@@ -50,6 +55,7 @@ class WhisperSTT:
                 raise
 
         self._language = None if (not language or language.strip().lower() == "auto") else language.strip().lower()
+        self._initial_prompt = (initial_prompt or "").strip() or None
         print(f"[STT] Whisper '{model_name}' ready ({device})")
 
     def transcribe(self, audio: np.ndarray) -> str:
@@ -63,8 +69,18 @@ class WhisperSTT:
                 condition_on_previous_text=False,  # no hallucinations, faster
                 vad_filter=True,
                 vad_parameters={"min_silence_duration_ms": 300},
+                initial_prompt=self._initial_prompt,
             )
-            return " ".join(s.text for s in segments).strip()
+            good_text: list[str] = []
+            for s in segments:
+                # Whisper flags each segment with how likely it is that there
+                # was no real speech there. High values mean it is probably
+                # hallucinating (background noise, silence, breathing) —
+                # skip those instead of trusting the invented text.
+                if getattr(s, "no_speech_prob", 0.0) > 0.6:
+                    continue
+                good_text.append(s.text)
+            return " ".join(good_text).strip()
         except Exception as e:
             print(f"[STT] Transcription error: {e}")
             raise

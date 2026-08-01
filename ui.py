@@ -1021,7 +1021,7 @@ class _CameraPreview(QWidget):
 
 
 class SetupOverlay(QWidget):
-    done = pyqtSignal(str, str)
+    done = pyqtSignal(str, str, str)   # gemini_key, os_name, provider ("gemini" | "local")
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1038,10 +1038,11 @@ class SetupOverlay(QWidget):
             _OS.lower(), "linux"
         )
         self._sel_os = detected
+        self._sel_provider = "local"
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(30, 22, 30, 22)
-        layout.setSpacing(8)
+        layout.setContentsMargins(30, 18, 30, 18)
+        layout.setSpacing(7)
 
         def _lbl(txt, font_size=9, bold=False, color=C.PRI,
                  align=Qt.AlignmentFlag.AlignCenter):
@@ -1054,14 +1055,34 @@ class SetupOverlay(QWidget):
 
         layout.addWidget(_lbl("◈  INITIALISATION REQUIRED", 13, True))
         layout.addWidget(_lbl("Configure J.A.R.V.I.S. before first boot.", 9, color=C.PRI_DIM))
-        layout.addSpacing(6)
+        layout.addSpacing(4)
+
+        sep0 = QFrame(); sep0.setFrameShape(QFrame.Shape.HLine)
+        sep0.setStyleSheet(f"color: {C.BORDER};"); layout.addWidget(sep0)
+        layout.addSpacing(2)
+
+        layout.addWidget(_lbl("ENGINE", 8, color=C.TEXT_DIM,
+                               align=Qt.AlignmentFlag.AlignLeft))
+        prov_row = QHBoxLayout(); prov_row.setSpacing(6)
+        self._prov_btns: dict[str, QPushButton] = {}
+        for key, label in [("local", "⌂  LOCAL (Ollama)"), ("gemini", "☁  GEMINI (cloud)")]:
+            btn = QPushButton(label)
+            btn.setFont(QFont("Courier New", 9, QFont.Weight.Bold))
+            btn.setFixedHeight(32)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.clicked.connect(lambda _, k=key: self._sel_prov(k))
+            prov_row.addWidget(btn)
+            self._prov_btns[key] = btn
+        layout.addLayout(prov_row)
+        layout.addSpacing(8)
 
         sep = QFrame(); sep.setFrameShape(QFrame.Shape.HLine)
         sep.setStyleSheet(f"color: {C.BORDER};"); layout.addWidget(sep)
         layout.addSpacing(4)
 
-        layout.addWidget(_lbl("GEMINI API KEY", 8, color=C.TEXT_DIM,
-                               align=Qt.AlignmentFlag.AlignLeft))
+        self._key_label = _lbl("GEMINI API KEY  (only needed for cloud engine)", 8,
+                                color=C.TEXT_DIM, align=Qt.AlignmentFlag.AlignLeft)
+        layout.addWidget(self._key_label)
         self._key_input = QLineEdit()
         self._key_input.setEchoMode(QLineEdit.EchoMode.Password)
         self._key_input.setPlaceholderText("AIza…")
@@ -1073,9 +1094,10 @@ class SetupOverlay(QWidget):
                 border: 1px solid {C.BORDER}; border-radius: 3px; padding: 4px 8px;
             }}
             QLineEdit:focus {{ border: 1px solid {C.PRI}; }}
+            QLineEdit:disabled {{ color: {C.TEXT_DIM}; background: #000a0e; }}
         """)
         layout.addWidget(self._key_input)
-        layout.addSpacing(12)
+        layout.addSpacing(10)
 
         sep2 = QFrame(); sep2.setFrameShape(QFrame.Shape.HLine)
         sep2.setStyleSheet(f"color: {C.BORDER};"); layout.addWidget(sep2)
@@ -1099,7 +1121,8 @@ class SetupOverlay(QWidget):
             self._os_btns[key] = btn
         layout.addLayout(os_row)
         self._sel(detected)
-        layout.addSpacing(12)
+        self._sel_prov("local")
+        layout.addSpacing(8)
 
         init_btn = QPushButton("▸  INITIALISE SYSTEMS")
         init_btn.setFont(QFont("Courier New", 10, QFont.Weight.Bold))
@@ -1116,6 +1139,32 @@ class SetupOverlay(QWidget):
         """)
         init_btn.clicked.connect(self._submit)
         layout.addWidget(init_btn)
+
+    def _sel_prov(self, key: str):
+        self._sel_provider = key
+        pal = {"local": (C.GREEN, "#001a0d"), "gemini": (C.PRI, "#001a22")}
+        for k, btn in self._prov_btns.items():
+            if k == key:
+                fg, bg = pal[k]
+                btn.setStyleSheet(f"""
+                    QPushButton {{
+                        background: {fg}; color: {bg};
+                        border: none; border-radius: 3px; font-weight: bold;
+                    }}
+                """)
+            else:
+                btn.setStyleSheet(f"""
+                    QPushButton {{
+                        background: #000d12; color: {C.TEXT_DIM};
+                        border: 1px solid {C.BORDER}; border-radius: 3px;
+                    }}
+                    QPushButton:hover {{ color: {C.TEXT}; border: 1px solid {C.BORDER_B}; }}
+                """)
+        is_gemini = (key == "gemini")
+        self._key_input.setEnabled(is_gemini)
+        self._key_label.setStyleSheet(
+            f"color: {C.TEXT_DIM if is_gemini else '#1e4a55'}; background: transparent;"
+        )
 
     def _sel(self, key: str):
         self._sel_os = key
@@ -1139,14 +1188,17 @@ class SetupOverlay(QWidget):
                 """)
 
     def _submit(self):
-        key = self._key_input.text().strip()
-        if not key:
-            self._key_input.setStyleSheet(
-                self._key_input.styleSheet() +
-                f" QLineEdit {{ border: 1px solid {C.RED}; }}"
-            )
-            return
-        self.done.emit(key, self._sel_os)
+        if self._sel_provider == "gemini":
+            key = self._key_input.text().strip()
+            if not key:
+                self._key_input.setStyleSheet(
+                    self._key_input.styleSheet() +
+                    f" QLineEdit {{ border: 1px solid {C.RED}; }}"
+                )
+                return
+            self.done.emit(key, self._sel_os, "gemini")
+        else:
+            self.done.emit("", self._sel_os, "local")
 
 
 class HueWheel(QWidget):
@@ -3205,17 +3257,13 @@ class MainWindow(QMainWindow):
         self.hud.speaking = (state == "SPEAKING")
 
     def _check_config(self) -> bool:
-        if not API_FILE.exists(): return False
-        try:
-            d = json.loads(API_FILE.read_text(encoding="utf-8"))
-            return bool(d.get("gemini_api_key")) and bool(d.get("os_system"))
-        except Exception:
-            return False
+        from memory.config_manager import is_configured as _is_cfg
+        return _is_cfg()
 
     def _show_setup(self):
         ov = SetupOverlay(self.centralWidget())
         cw = self.centralWidget()
-        ow, oh = 460, 390
+        ow, oh = 460, 430
         ov.setGeometry(
             (cw.width()  - ow) // 2,
             (cw.height() - oh) // 2,
@@ -3225,12 +3273,20 @@ class MainWindow(QMainWindow):
         ov.show()
         self._overlay = ov
 
-    def _on_setup_done(self, key: str, os_name: str):
+    def _on_setup_done(self, key: str, os_name: str, provider: str):
         os.makedirs(CONFIG_DIR, exist_ok=True)
-        API_FILE.write_text(
-            json.dumps({"gemini_api_key": key, "os_system": os_name}, indent=4),
-            encoding="utf-8",
-        )
+        data = _read_full_config()
+        data["os_system"] = os_name
+        if provider == "gemini":
+            data["gemini_api_key"] = key
+        else:
+            data["llm_provider"] = "ollama"
+            data["llm_url"]      = "http://localhost:11434"
+            data["llm_model"]    = "gemma3:12b"
+            data["stt_engine"]   = "whisper"
+            data["tts_engine"]   = "kokoro"
+            data["tts_voice"]    = "if_sara"
+        API_FILE.write_text(json.dumps(data, indent=4), encoding="utf-8")
         self._ready = True
         if self._overlay:
             self._overlay.hide()
