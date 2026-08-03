@@ -128,25 +128,93 @@ class EdgeTTSEngine:
 
 
 # ---------------------------------------------------------------------------
-# Kokoro import helper — auto-upgrades on version-mismatch errors
+# Kokoro import helper — auto-upgrades on version-mismatch errors, and works
+# around a known, unresolved Windows bug in thinc/blis (spacy's math backend)
+# by stubbing out spacy entirely — Kokoro only needs it for English text
+# processing, which this project never uses (Italian only).
 # ---------------------------------------------------------------------------
 
 # Errors that indicate the installed kokoro uses old transformers classes
 # (AlbertModel, AutoModel) that are no longer exported at the top level.
 _KOKORO_COMPAT_ERRORS = ("AlbertModel", "AutoModel", "cannot import name")
 
+# Marker for the known Windows thinc/blis crash (acknowledged unresolved bug
+# upstream). We never use Kokoro's English pipeline (spacy-based), so it is
+# safe to replace spacy with a harmless stand-in instead of fixing blis itself.
+_BLIS_CRASH_MARKER = "BLIS support requires blis"
+
+
+def _install_spacy_stub() -> None:
+    """
+    Replaces 'spacy' (and the couple of submodules misaki.en commonly touches)
+    with harmless empty stand-ins in sys.modules. Only used as a fallback when
+    the real spacy import crashes due to the known Windows thinc/blis bug —
+    English text processing (the only thing that needs spacy here) is never
+    used in this project, so a non-functional stub is safe.
+    """
+    import sys as _sys
+    import types as _types
+
+    if getattr(_sys.modules.get("spacy"), "_jarvis_stub", False):
+        return  # already installed
+
+    class _DummyDoc:
+        def __init__(self, *a, **kw):
+            pass
+
+    class _DummyLanguage:
+        def __init__(self, *a, **kw):
+            pass
+
+        def __call__(self, *a, **kw):
+            return _DummyDoc()
+
+    stub = _types.ModuleType("spacy")
+    stub._jarvis_stub = True
+    stub.blank    = lambda *a, **kw: _DummyLanguage()
+    stub.load     = lambda *a, **kw: _DummyLanguage()
+    stub.Language = _DummyLanguage
+
+    tokens_mod          = _types.ModuleType("spacy.tokens")
+    tokens_mod.Doc       = _DummyDoc
+    tokens_mod.Span      = _DummyDoc
+    tokens_mod.Token     = _DummyDoc
+
+    language_mod          = _types.ModuleType("spacy.language")
+    language_mod.Language = _DummyLanguage
+
+    stub.tokens   = tokens_mod
+    stub.language = language_mod
+
+    _sys.modules["spacy"]          = stub
+    _sys.modules["spacy.tokens"]   = tokens_mod
+    _sys.modules["spacy.language"] = language_mod
+
+    # Flush anything that may have partially imported before the crash, so
+    # the retry starts clean and picks up the stub instead of a broken state.
+    stale = [
+        k for k in _sys.modules
+        if k.startswith(("thinc", "misaki", "kokoro"))
+    ]
+    for key in stale:
+        del _sys.modules[key]
+
 
 def _import_kokoro_pipeline():
-    """Import KPipeline, auto-upgrading kokoro if a version mismatch is found.
+    """Import KPipeline, auto-upgrading kokoro if a version mismatch is found,
+    and working around the Windows thinc/blis crash via a spacy stub if needed.
 
     Old kokoro (<0.9) imports AlbertModel / AutoModel from transformers.
     Newer transformers versions no longer export these at the top level,
     causing an ImportError.  kokoro>=0.9 removed these dependencies.
 
-    When the error is detected we:
+    When the version-mismatch error is detected we:
       1. Upgrade kokoro to >=0.9 via pip (silent, background)
       2. Flush stale kokoro entries from sys.modules
       3. Re-import — this time it should succeed
+
+    When the blis crash is detected instead, we install the spacy stub
+    (see _install_spacy_stub) and retry once.
     """
     import sys
 
@@ -156,6 +224,20 @@ def _import_kokoro_pipeline():
 
     try:
         return _try_import()
+    except ValueError as blis_err:
+        if _BLIS_CRASH_MARKER not in str(blis_err):
+            raise
+        print("[TTS] Known Windows thinc/blis crash detected — "
+              "stubbing out spacy (English-only feature, unused here)…")
+        _install_spacy_stub()
+        try:
+            return _try_import()
+        except Exception as retry_err:
+            raise RuntimeError(
+                f"Kokoro still fails after spacy stub: {retry_err}\n"
+                "The stub may need to cover more of spacy's API — "
+                "tell the assistant the new error so it can be extended."
+            ) from retry_err
     except Exception as first_err:
         err_msg = str(first_err)
         if not any(marker in err_msg for marker in _KOKORO_COMPAT_ERRORS):

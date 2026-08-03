@@ -77,6 +77,17 @@ def _time_context() -> str:
     )
 
 
+def _ensure_read_session() -> None:
+    """
+    Forces the dedicated JARVIS automation session to exist before navigating.
+    browser_control's go_to/search only use the automation window if a session
+    already exists for that browser — otherwise they open the user's real
+    Chrome instead. This no-op call creates the session first, so the real
+    navigation right after it stays inside the dedicated window.
+    """
+    browser_control({"action": "get_url", "browser": READ_BROWSER})
+
+
 # ── Tools — Phase 2 ───────────────────────────────────────────────────────────
 # Described in the OpenAI/Ollama function-calling format.
 TOOLS = [
@@ -286,9 +297,10 @@ class JarvisLocal:
         self.ui.stop_speaking()
 
     def _read_website(self, url: str) -> str:
-        """Opens a URL in Chrome (automation-ready) and reads its text content."""
+        """Opens a URL only in the dedicated JARVIS window and reads its text content."""
         if not url.startswith(("http://", "https://")):
             url = "https://" + url
+        _ensure_read_session()
         open_result = browser_control({"action": "go_to", "url": url, "browser": READ_BROWSER})
         if not str(open_result).lower().startswith("opened"):
             return f"Could not open {url}: {open_result}"
@@ -296,8 +308,10 @@ class JarvisLocal:
         return str(text_result)[:4000] if text_result else "The page loaded but had no readable text."
 
     def _browser_control(self, args: dict) -> str:
-        """Runs a browser_control action, always pinned to Chrome for automation reliability."""
+        """Runs a browser_control action, always pinned to the dedicated JARVIS window."""
         action = (args.get("action") or "").strip()
+        if action in ("go_to", "search", "new_tab"):
+            _ensure_read_session()
         payload = {"action": action, "browser": READ_BROWSER}
         if args.get("url"):
             payload["url"] = args["url"]
