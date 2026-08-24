@@ -28,17 +28,19 @@ from core.tts import create_tts_player
 from core.llm_client import (
     call_llm, ensure_ollama_running, warmup_model, check_model_available,
 )
-from core.mic_recorder import record_utterance
+from core.wake_word import VoiceListener
 from core.boot_sound import play_boot_sequence
 from memory.config_manager import load_api_keys, is_local_configured
 from memory.source_preferences import (
     load_source_prefs, save_source_pref, format_source_prefs_for_prompt,
 )
 
-from actions.open_app import open_app
+from actions.open_app import open_app, close_app, save_document, type_text
 from actions.web_search import web_search as web_search_action
 from actions.weather_report import weather_action
 from actions.browser_control import browser_control
+from actions.system_monitor import get_system_status
+from actions.reminder import reminder as reminder_action
 
 
 def get_base_dir() -> Path:
@@ -109,6 +111,114 @@ TOOLS = [
                     }
                 },
                 "required": ["app_name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "close_app",
+            "description": (
+                "Closes/terminates a specific named application, by finding and stopping its "
+                "running process. Only call this AFTER the user has confirmed whether they want "
+                "to save first (per the BEFORE CLOSING AN APP rule) — never as the first response "
+                "to a closing request. If the user says 'close everything' without naming an app, "
+                "ask which app they mean instead of guessing."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "app_name": {
+                        "type": "string",
+                        "description": "Exact name of the application to close (e.g. 'Notepad', 'Chrome')",
+                    }
+                },
+                "required": ["app_name"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "save_document",
+            "description": (
+                "Saves the document currently open in the focused application, to a location "
+                "and file name the user specifies. Only call this after the user has explicitly "
+                "said they want to save and told you where and what to name it."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "location": {
+                        "type": "string",
+                        "description": "Where to save (e.g. 'Desktop', 'Documents', or a full folder path)",
+                    },
+                    "filename": {
+                        "type": "string",
+                        "description": "File name to save as, as given by the user",
+                    },
+                },
+                "required": ["location", "filename"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "type_text",
+            "description": (
+                "Types the given text into whichever application window currently has focus. "
+                "Use this when the user asks you to write, type, or dictate specific text into "
+                "an app they just opened (e.g. 'write this in Notepad: ...'). Call open_app first "
+                "if the target app isn't open yet."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "text": {
+                        "type": "string",
+                        "description": "The exact text to type",
+                    }
+                },
+                "required": ["text"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "reminder",
+            "description": (
+                "Sets a reminder that fires a real system notification (with sound) at a specific "
+                "date and time, even if JARVIS itself is closed. Use this for any request to be "
+                "reminded, alerted, or woken up about something at a specific time — including "
+                "things phrased as alarms ('wake me at...', 'svegliami alle...') or timed alerts. "
+                "Always ask for the exact date and time if the user hasn't given both."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "date":    {"type": "string", "description": "Date in YYYY-MM-DD format"},
+                    "time":    {"type": "string", "description": "Time in HH:MM 24-hour format"},
+                    "message": {"type": "string", "description": "What the reminder is about"},
+                },
+                "required": ["date", "time", "message"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "mute_microphone",
+            "description": (
+                "Mutes the microphone so JARVIS stops listening. Use only when the user explicitly "
+                "asks to be muted, silenced, or to stop listening. To unmute, the user must press "
+                "the on-screen button themselves — you cannot unmute via voice, so mention this "
+                "briefly when muting."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {},
             },
         },
     },
@@ -225,11 +335,31 @@ TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "system_status",
+            "description": (
+                "Returns real-time metrics about the computer running JARVIS: CPU usage, RAM usage, "
+                "GPU load, CPU temperature, uptime, and running process count. "
+                "Use this any time the user asks — in whatever words — how the computer or system "
+                "is doing, feeling, performing, or holding up; whether everything is OK, running smoothly, "
+                "overloaded, hot, or slow; or asks directly about CPU, RAM, GPU, temperature, memory, "
+                "or performance. This includes casual, indirect phrasings like 'how are you holding up', "
+                "'how's it going in there', 'everything alright with the machine', not just technical ones."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {},
+            },
+        },
+    },
 ]
 
 _VALID_TOOL_NAMES = {
-    "open_app", "web_search", "weather_report",
-    "read_website", "browser_control", "save_source_preference",
+    "open_app", "close_app", "save_document", "type_text", "reminder",
+    "mute_microphone", "web_search", "weather_report", "read_website",
+    "browser_control", "save_source_preference", "system_status",
 }
 
 # Catches a tool call the model wrote as visible text instead of using the
@@ -257,9 +387,10 @@ def _extract_fake_tool_call(text: str):
 
 class JarvisLocal:
     """
-    Local core loop: listen (Whisper) → think (Ollama, with tools) → speak (Kokoro).
-    Phase 2: 6 tools connected (open_app, web_search, weather_report,
-    read_website, browser_control, save_source_preference).
+    Local core loop: wait for wake word → listen (Whisper) → think (Ollama,
+    with tools) → speak (Kokoro). One persistent mic stream shared between the
+    wake-word listener and the command recorder (see core/wake_word.py).
+    Phase 2: 12 tools connected. Wake word: 'hey jarvis' via openWakeWord.
     """
 
     def __init__(self, ui: JarvisUI):
@@ -269,6 +400,7 @@ class JarvisLocal:
         self._busy = False
         self._stt = None
         self._tts = None
+        self._voice = None
         self.ui.on_text_command = self._on_text_command
         self.ui.on_interrupt    = self._do_interrupt
 
@@ -322,6 +454,10 @@ class JarvisLocal:
             return str(result)[:4000]
         return str(result)
 
+    def _mute_microphone(self) -> str:
+        self.ui.set_muted(True)
+        return "Microphone muted. Press the on-screen button to unmute."
+
     def _execute_tool(self, name: str, args: dict) -> str:
         """Runs the actual Python function behind a tool call. Returns a text result."""
         self.ui.write_log(f"SYS: uso {name}...")
@@ -329,6 +465,25 @@ class JarvisLocal:
             if name == "open_app":
                 result = open_app(parameters=args, response=None, player=self.ui)
                 return result or f"Opened {args.get('app_name')}."
+
+            if name == "close_app":
+                result = close_app(parameters=args, response=None, player=self.ui)
+                return result or f"Closed {args.get('app_name')}."
+
+            if name == "save_document":
+                result = save_document(parameters=args, response=None, player=self.ui)
+                return result or "Save attempted."
+
+            if name == "type_text":
+                result = type_text(parameters=args, response=None, player=self.ui)
+                return result or "Text typed."
+
+            if name == "reminder":
+                result = reminder_action(parameters=args, response=None, player=self.ui)
+                return result or "Reminder attempted."
+
+            if name == "mute_microphone":
+                return self._mute_microphone()
 
             if name == "web_search":
                 result = web_search_action(parameters=args, player=self.ui)
@@ -349,6 +504,10 @@ class JarvisLocal:
                 url   = args.get("url", "")
                 save_source_pref(topic, url)
                 return f"Saved: for '{topic}', always use {url}."
+
+            if name == "system_status":
+                status = get_system_status()
+                return str(status)
 
             return f"Unknown tool: {name}"
         except Exception as e:
@@ -414,30 +573,64 @@ class JarvisLocal:
         finally:
             self._busy = False
 
+    # Seconds JARVIS keeps listening for a follow-up after a reply, before it
+    # goes back to waiting for the wake word. Lets the user continue talking
+    # (correct, insist, ask again) without repeating "hey jarvis".
+    FOLLOW_UP_SECONDS = 5.0
+
     def _voice_loop(self):
         while True:
             if self.ui.muted or self._busy:
                 time.sleep(0.2)
                 continue
+
+            # 1) Lightweight always-on wait for "hey jarvis" — minimal CPU.
             self.ui.set_state("LISTENING")
-            audio = record_utterance(should_stop=lambda: self.ui.muted)
-            if audio.size < 1600:
+            heard = self._voice.wait_for_wake(
+                should_stop=lambda: self.ui.muted or self._busy
+            )
+            if not heard:
                 continue
-            if self.ui.muted:
-                continue
-            self.ui.set_state("THINKING")
-            try:
-                text = self._stt.transcribe(audio).strip()
-            except Exception as e:
-                self.ui.write_log(f"ERR: Transcription failed — {e}")
-                continue
-            if not text:
-                if not self.ui.muted:
-                    self.ui.set_state("LISTENING")
-                continue
-            # Voice input has no other place logging it — log it here, once.
-            self.ui.write_log(f"You: {text}")
-            self._handle_input(text)
+
+            # 2) Wake word heard — record the first command from the same live
+            #    stream (no reopen, first words not lost).
+            self.ui.write_log("SYS: 'Hey Jarvis' rilevato — in ascolto.")
+            first = True
+
+            # 3) Stay in an active follow-up window: after each reply, keep
+            #    listening for a few seconds so the user can continue without
+            #    repeating the wake word. Silence past FOLLOW_UP_SECONDS ends it.
+            while True:
+                if self.ui.muted:
+                    break
+
+                audio = self._voice.record_utterance(
+                    should_stop=lambda: self.ui.muted,
+                    start_timeout_s=None if first else self.FOLLOW_UP_SECONDS,
+                    drain_first=not first,
+                )
+                first = False
+
+                if audio.size < 1600:
+                    # No speech within the follow-up window → back to wake word.
+                    self.ui.write_log("SYS: Torno in attesa di 'Hey Jarvis'.")
+                    break
+
+                if self.ui.muted:
+                    break
+
+                self.ui.set_state("THINKING")
+                try:
+                    text = self._stt.transcribe(audio).strip()
+                except Exception as e:
+                    self.ui.write_log(f"ERR: Transcription failed — {e}")
+                    continue
+                if not text:
+                    continue
+
+                self.ui.write_log(f"You: {text}")
+                self._handle_input(text)
+                # loop back → keep listening for a follow-up
 
     def run(self):
         if not is_local_configured():
@@ -471,6 +664,13 @@ class JarvisLocal:
             self.ui.write_log(f"ERR: TTS failed to load — {e}")
             return
 
+        self.ui.write_log("SYS: Loading wake word listener ('hey jarvis')...")
+        try:
+            self._voice = VoiceListener(wake_model="hey_jarvis", threshold=0.5)
+        except Exception as e:
+            self.ui.write_log(f"ERR: Wake word failed to load — {e}")
+            return
+
         self.ui.write_log("SYS: Warming up language model...")
         warmup_model(_time_context() + _load_system_prompt())
         check_model_available(log=self.ui.write_log)
@@ -484,7 +684,10 @@ class JarvisLocal:
             self.ui.write_log(f"ERR: Boot sound failed — {e}")
 
         now_str = datetime.now().strftime("%H:%M")
-        greeting = f"Sono le {now_str}. Sistemi operativi. Jarvis a sua disposizione, signore."
+        greeting = (
+            f"Sono le {now_str}. Sistemi operativi. "
+            f"Mi chiami con 'Hey Jarvis' quando ha bisogno, signore."
+        )
         self.ui.write_log(f"{self.ui.assistant_name}: {greeting}")
         self._speak(greeting)
 

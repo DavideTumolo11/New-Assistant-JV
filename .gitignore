@@ -1,1 +1,5 @@
 config/api_keys.json
+google_credentials.json
+token.json
+__pycache__/
+*.pyc

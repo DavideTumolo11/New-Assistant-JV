@@ -2,6 +2,7 @@ import time
 import subprocess
 import platform
 import shutil
+from pathlib import Path
 
 try:
     import psutil
@@ -275,3 +276,146 @@ def open_app(
     except Exception as e:
         print(f"[open_app] Error: {e}")
         return f"Failed to open {app_name}: {e}"
+
+
+def close_app(
+    parameters=None,
+    response=None,
+    player=None,
+    session_memory=None,
+) -> str:
+    """
+    Finds and terminates running processes matching a named application.
+    Uses the same alias table as open_app, so any name that works for
+    opening an app also works for closing it.
+    """
+    app_name = (parameters or {}).get("app_name", "").strip()
+
+    if not app_name:
+        return "No application name provided."
+
+    if not _PSUTIL:
+        return "Cannot close applications: the 'psutil' package is not installed."
+
+    normalized = _normalize(app_name)
+    # Strip a path/extension down to a bare process-name fragment to match against,
+    # e.g. "notepad.exe" -> "notepad", "chrome" -> "chrome".
+    target = normalized.split("\\")[-1].split("/")[-1]
+    target = target[:-4] if target.lower().endswith(".exe") else target
+    target = target.lower().strip()
+
+    if player:
+        player.write_log(f"[close_app] {app_name}")
+
+    closed_names: list[str] = []
+    try:
+        for proc in psutil.process_iter(["pid", "name"]):
+            try:
+                proc_name = (proc.info.get("name") or "").lower()
+                proc_base = proc_name[:-4] if proc_name.endswith(".exe") else proc_name
+                if target and (target in proc_base or proc_base in target):
+                    proc.terminate()
+                    closed_names.append(proc.info.get("name") or target)
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+    except Exception as e:
+        print(f"[close_app] Error: {e}")
+        return f"Failed to close {app_name}: {e}"
+
+    if closed_names:
+        unique = sorted(set(closed_names))
+        return f"Closed {app_name} ({len(closed_names)} process(es): {', '.join(unique)})."
+    return f"No running process found matching '{app_name}'. It may already be closed."
+
+
+def save_document(
+    parameters=None,
+    response=None,
+    player=None,
+    session_memory=None,
+) -> str:
+    """
+    Sends Ctrl+S to the currently focused window, then types the given
+    location as a full file path into the save dialog and confirms.
+
+    Reliable on simple apps with a standard Windows save dialog (Notepad
+    and similar). More complex apps (Word, code editors) may behave
+    differently — not guaranteed to work identically everywhere.
+    """
+    location = (parameters or {}).get("location", "").strip()
+    filename = (parameters or {}).get("filename", "").strip()
+
+    if not location:
+        return "No save location provided."
+
+    try:
+        import pyautogui
+    except ImportError:
+        return "Cannot save: the 'pyautogui' package is not installed."
+
+    home = Path.home()
+    location_map = {
+        "desktop":    home / "Desktop",
+        "scrivania":  home / "Desktop",
+        "documenti":  home / "Documents",
+        "documents":  home / "Documents",
+        "download":   home / "Downloads",
+        "downloads":  home / "Downloads",
+    }
+    folder = location_map.get(location.lower(), Path(location))
+
+    if not filename:
+        filename = "jarvis_note.txt"
+    if "." not in filename:
+        filename += ".txt"
+
+    full_path = str(folder / filename)
+
+    if player:
+        player.write_log(f"[save_document] {full_path}")
+
+    try:
+        pyautogui.hotkey("ctrl", "s")
+        time.sleep(1.0)
+        pyautogui.write(full_path, interval=0.03)
+        time.sleep(0.3)
+        pyautogui.press("enter")
+        time.sleep(1.0)
+        # If a file with this name already exists, most apps ask to confirm
+        # overwrite — this Enter confirms that dialog too (harmless if none appears).
+        pyautogui.press("enter")
+        return f"Saved to {full_path}."
+    except Exception as e:
+        return f"Failed to save: {e}"
+
+
+def type_text(
+    parameters=None,
+    response=None,
+    player=None,
+    session_memory=None,
+) -> str:
+    """
+    Types the given text into whatever window currently has focus — meant
+    to be used right after open_app, so the newly opened app (e.g. Notepad)
+    is the one receiving the text.
+    """
+    text = (parameters or {}).get("text", "")
+
+    if not text:
+        return "No text provided to type."
+
+    try:
+        import pyautogui
+    except ImportError:
+        return "Cannot type: the 'pyautogui' package is not installed."
+
+    if player:
+        player.write_log(f"[type_text] {text[:60]}")
+
+    try:
+        time.sleep(0.3)   # brief pause so the target window is definitely focused
+        pyautogui.write(text, interval=0.02)
+        return "Text typed."
+    except Exception as e:
+        return f"Failed to type text: {e}"

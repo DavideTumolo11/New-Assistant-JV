@@ -1787,6 +1787,7 @@ class MainWindow(QMainWindow):
     _cam_stream_sig = pyqtSignal(bool)       # True=start live stream, False=stop
     _cam_frame_sig  = pyqtSignal(bytes)      # live camera frame → HUD area
     _clipboard_sig  = pyqtSignal(str)        # clipboard text changed (thread-safe)
+    _mute_sig       = pyqtSignal(bool)       # thread-safe mic mute/unmute from any thread
 
     def __init__(self, face_path: str):
         super().__init__()
@@ -1928,6 +1929,7 @@ class MainWindow(QMainWindow):
         self._cam_stream_sig.connect(self._on_cam_stream)
         self._cam_frame_sig.connect(self._on_cam_frame)
         self._clipboard_sig.connect(self._show_clipboard_panel)
+        self._mute_sig.connect(self._set_muted_safe)
         self._cam_stop = threading.Event()
 
         # Camera preview overlay (child of central widget, positioned in resizeEvent)
@@ -3225,6 +3227,11 @@ class MainWindow(QMainWindow):
             self._apply_state("LISTENING")
             self._log.append_log("SYS: Microphone active.")
 
+    def _set_muted_safe(self, value: bool):
+        """Slot for _mute_sig — safely applies a mute/unmute request from any thread."""
+        if value != self._muted:
+            self._toggle_mute()
+
     def _style_mute_btn(self):
         if self._muted:
             self._mute_btn.setText("🔇  MICROPHONE MUTED")
@@ -3320,6 +3327,10 @@ class JarvisUI:
     def muted(self, v: bool):
         if v != self._win._muted:
             self._win._toggle_mute()
+
+    def set_muted(self, value: bool) -> None:
+        """Thread-safe: mute or unmute the microphone from any thread (e.g. a tool call)."""
+        self._win._mute_sig.emit(value)
 
     @property
     def current_file(self) -> str | None:

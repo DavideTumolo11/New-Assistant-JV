@@ -308,9 +308,10 @@ class KokoroTTSEngine:
     # Silence prepended before the very first audio chunk of an utterance.
     # Gives the audio device time to open the output stream so the real
     # speech doesn't lose its first phoneme(s) to device startup latency.
-    # Raised from 120ms to 350ms — 120ms was not enough on this system,
-    # the first word was still getting clipped/delayed.
-    _LEAD_IN_MS = 350
+    # Raised to 600ms — with the always-on wake-word mic, the output device
+    # is idle before a reply, so it needs more lead-in to avoid clipping the
+    # first word (e.g. "sono le" being cut off).
+    _LEAD_IN_MS = 600
 
     def __init__(self, voice: str = "af_heart", speed: float = 1.0):
         self.voice     = voice
